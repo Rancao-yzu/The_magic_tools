@@ -1,0 +1,8 @@
+build
+devel
+*.ver
+*.pyc
+**/.vscode
+**/OUT
+libmy_rviz_plugin.so
+.catkin_workspace
