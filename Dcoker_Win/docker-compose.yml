@@ -28,6 +28,6 @@ services:
       CPU_CORES: "4"         # CPU 核心数
       DISK_SIZE: "64G"       # 虚拟磁盘大小
       LANGUAGE: "Chinese"    # 系统语言
-      ENABLE_RDP: "Y"        # 开启远程桌面功能,用户名：docker,密码：radmin
+      ENABLE_RDP: "Y"        # 开启远程桌面功能,用户名：docker,密码：admin
 
     stop_grace_period: 120s

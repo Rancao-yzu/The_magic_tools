@@ -1,0 +1,10 @@
+#!/bin/bash
+# 带低延迟优化的启动脚本
+
+SCRCPY_ICON_PATH="./icon.png" \
+SCRCPY_SERVER_PATH="./scrcpy-server" \
+exec ./scrcpy \
+    --no-audio \
+    --max-fps=60 \
+    --keyboard=uhid \
+    "$@"
