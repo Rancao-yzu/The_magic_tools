@@ -4,6 +4,7 @@
 可转债持仓实时涨跌 + 加权值计算（只输出统计 + 指数）
 数据源：腾讯财经（qt.gtimg.cn）
 功能：每 10 分钟自动运行一次，结果追加写入同目录 CSV
+      每轮运行前会询问是否打印每只转债的明细，终端输出支持红涨绿跌
 """
 
 import os
@@ -12,6 +13,11 @@ import csv
 import sys
 import time
 import urllib.request
+
+try:
+    import select
+except ImportError:
+    select = None
 
 # ============================ 持仓数据 ============================
 HOLDINGS_TEXT = """
@@ -68,7 +74,9 @@ HOLDINGS_TEXT = """
 """
 
 # ============================ 配置 ============================
-INTERVAL = 60                                  # 运行间隔（秒），600 = 10 分钟
+INTERVAL = 60
+ASK_TIMEOUT = 15
+DEFAULT_VERBOSE = False
 CSV_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'cb_monitor.csv')
 
 INDEX_SYMBOLS = [
@@ -95,6 +103,55 @@ def now_str():
     return time.strftime('%Y-%m-%d %H:%M:%S')
 
 
+def disp_width(s):
+    return sum(2 if ord(ch) > 0x2E7F else 1 for ch in s)
+
+
+def pad(s, width):
+    s = str(s)
+    return s + ' ' * max(0, width - disp_width(s))
+
+
+def colorize(text, val):
+    """
+    根据数值自动添加颜色：涨红跌绿
+    使用 ANSI 转义序列：\033[91m 为亮红，\033[92m 为亮绿，\033[0m 重置颜色
+    """
+    if val is None:
+        return text
+    if val > 0:
+        return f'\033[91m{text}\033[0m'
+    elif val < 0:
+        return f'\033[92m{text}\033[0m'
+    return text
+
+
+def ask_detail(timeout=ASK_TIMEOUT, default=DEFAULT_VERBOSE):
+    if select is None or not sys.stdin or not sys.stdin.isatty():
+        return default
+
+    prompt = (f'是否打印每只转债明细？'
+              f'[{("Y/n" if default else "y/N")}]（{timeout}s 无输入按默认）：')
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    try:
+        ready, _, _ = select.select([sys.stdin], [], [], timeout)
+    except Exception:
+        print()
+        return default
+
+    if not ready:
+        print('（超时，默认不打印明细）')
+        return default
+
+    answer = sys.stdin.readline().strip().lower()
+    if answer == '':
+        print(f'（默认：{"打印" if default else "不打印"}明细）')
+        return default
+    return answer in ('y', 'yes', '是', '1', 'true', 't')
+
+
 def parse_holdings(text):
     rows = []
     for line in text.strip().splitlines():
@@ -116,7 +173,6 @@ def parse_holdings(text):
 
 
 def to_symbol(code):
-    """110/111/113/118 -> 上交所 sh；123/127/128 -> 深交所 sz"""
     if code[:3] in ('110', '111', '113', '118'):
         return 'sh' + code
     if code[:3] in ('123', '127', '128'):
@@ -125,7 +181,6 @@ def to_symbol(code):
 
 
 def fetch_quotes(symbols, batch=60, timeout=15, retry=2, tag='行情'):
-    """传入如 ['sh113052', 'sz123176', 'sh000001']，返回行情字典"""
     quotes = {}
     total = len(symbols)
     if total == 0:
@@ -181,16 +236,11 @@ def fetch_quotes(symbols, batch=60, timeout=15, retry=2, tag='行情'):
                 'pct': chg / prev * 100.0,
             }
 
-        elapsed = time.time() - t0
-        got = len(quotes) - before
-
-
     return quotes
 
 
 # ============================ 单次运行 ============================
-def run_once():
-    """执行一次抓取+统计+打印，返回结果字典（供 CSV 使用）"""
+def run_once(verbose=False):
     t_start = time.time()
     run_time = now_str()
     print(f'\n{run_time}')
@@ -202,11 +252,13 @@ def run_once():
     total_w = 0.0
     weighted_sum = 0.0
     up = down = flat = 0
+    details = []
 
     for r in rows:
         sym = to_symbol(r['code'])
         q = quotes.get(sym) if sym else None
         if q is None:
+            details.append((r['name'], r['code'], None, None, r['weight'], None))
             continue
 
         pct = q['pct']
@@ -221,6 +273,28 @@ def run_once():
         else:
             flat += 1
 
+        details.append((r['name'], r['code'], q['price'], pct, w, w * pct / 100.0))
+
+    # ---------- 明细（带颜色） ----------
+    if verbose:
+        print('【明细】')
+        head = (pad('名称', 12) + pad('代码', 8) + pad('现价', 10) +
+                pad('涨跌幅%', 11) + pad('权重%', 8) + pad('贡献%', 10))
+        print(head)
+        print('-' * disp_width(head))
+        for name, code, price, pct, w, c in details:
+            if price is None:
+                print(pad(name, 12) + pad(code, 8) + '行情缺失')
+                continue
+            # 先对齐，再上色
+            pct_str = colorize(pad(f'{pct:+.3f}', 11), pct)
+            c_str = colorize(pad(f'{c:+.4f}', 10), c)
+            print(pad(name, 12) + pad(code, 8) +
+                  pad(f'{price:.3f}', 10) +
+                  pct_str + pad(f'{w:.2f}', 8) + c_str)
+        print('-' * disp_width(head))
+
+    # ---------- 统计（带颜色） ----------
     avg_pct = None
     contrib = None
     if total_w > 0:
@@ -228,23 +302,24 @@ def run_once():
         contrib = weighted_sum / 100.0
         print(f'【统计】上涨 {up} 只 / 下跌 {down} 只 / 平盘 {flat} 只')
         print(f'【权重】覆盖占比合计：{total_w:.2f}%')
-        print(f'【加权平均涨跌幅】（按占比归一）：{avg_pct:+.3f}%')
-        print(f'【对组合净值的贡献】          ：{contrib:+.4f}%')
+        # 给涨跌幅和贡献值上色
+        print('【加权平均涨跌幅】（按占比归一）：' + colorize(f'{avg_pct:+.3f}%', avg_pct))
+        print('【对组合净值的贡献】          ：' + colorize(f'{contrib:+.4f}%', contrib))
     else:
         print('未获取到有效转债行情')
 
-    # 指数行情
+    # ---------- 指数行情（带颜色） ----------
     idx_quotes = fetch_quotes([s for s, _ in INDEX_SYMBOLS], tag='指数')
     idx_result = {}
     for sym, label in INDEX_SYMBOLS:
         q = idx_quotes.get(sym)
         if q:
-            print(f'{label:6s} {q["price"]:>10.2f}  {q["pct"]:+.2f}%')
+            pct_str = colorize(f'{q["pct"]:+.2f}%', q['pct'])
+            print(f'{label:6s} {q["price"]:>10.2f}  {pct_str}')
             idx_result[label] = (q['price'], q['pct'])
         else:
             print(f'{label:6s} {"--":>10s}  {"--":>6s}')
             idx_result[label] = (None, None)
-
 
     return {
         'time': run_time,
@@ -258,7 +333,6 @@ def run_once():
 
 # ============================ CSV ============================
 def save_csv(result):
-    """把单次结果追加到 CSV；文件不存在则先写表头"""
     file_exists = os.path.exists(CSV_FILE)
     idx = result['indexes']
 
@@ -277,7 +351,6 @@ def save_csv(result):
         row.append(fmt(price, 2))
         row.append(fmt(pct, 2))
 
-    # utf-8-sig 让 Excel 打开不乱码
     with open(CSV_FILE, 'a', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         if not file_exists:
@@ -285,25 +358,20 @@ def save_csv(result):
         writer.writerow(row)
 
 
-
 # ============================ 主循环 ============================
 def main():
-
     try:
         while True:
+            verbose = ask_detail()
             cycle_start = time.time()
             try:
-                result = run_once()
+                result = run_once(verbose=verbose)
                 save_csv(result)
             except Exception as e:
                 print(f'[错误] {now_str()} 本轮运行失败：{e}', file=sys.stderr)
 
-            # 按周期对齐：从本轮开始算起每 INTERVAL 秒跑一次
             elapsed = time.time() - cycle_start
             wait = max(0.0, INTERVAL - elapsed)
-            next_time = time.strftime('%Y-%m-%d %H:%M:%S',
-                                      time.localtime(time.time() + wait))
-            print(f'【等待】下次运行：{next_time}  (Ctrl+C 退出)\n')
 
             try:
                 time.sleep(wait)
