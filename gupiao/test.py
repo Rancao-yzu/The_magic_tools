@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-可转债持仓实时涨跌 + 加权值计算（只输出统计 + 指数）
+可转债持仓实时涨跌 + 加权值计算 + 债券基金估算（合并版）
 数据源：腾讯财经（qt.gtimg.cn）
-功能：每 10 分钟自动运行一次，结果追加写入同目录 CSV
-      每轮运行前会询问是否打印每只转债的明细，终端输出支持红涨绿跌
+功能：
+  1. 每 10 分钟自动运行一次，结果追加写入同目录 CSV
+  2. 每轮运行前询问是否打印每只转债的明细
+  3. 可转债部分按原始持仓实时计算（不用 ETF 代理）
+  4. 债券基金部分（国债/政金债/信用债/同业存单）用 ETF 代理估算
+  5. 最后做加权核算，估算基金净值涨跌
 """
 
 import os
@@ -97,6 +101,21 @@ CSV_HEADER = [
 
 ROW_RE = re.compile(r'(\d{6})\s+(.+?)\s+([\d,]+\.\d+)\s+([\d.]+)')
 
+# ============================ 债券基金配置 ============================
+# 债券基金各品种用 ETF 代理，权重为占基金净值%
+BOND_FUND = [
+    ('国家债券',      1.63,  'sh511010'),   # 国债ETF
+    ('政策性金融债', 17.61,  'sh511520'),   # 政金债ETF
+    ('信用债',       70.10,  'sh511190'),   # 信用债ETF
+    ('同业存单',      9.56,  'sz159649'),   # 同业存单ETF
+]
+LEVERAGE = 1.0772   # 总资产/净值
+
+# ============================ 颜色 ============================
+RED = '\033[91m'
+GREEN = '\033[92m'
+RESET = '\033[0m'
+
 
 # ============================ 工具函数 ============================
 def now_str():
@@ -113,16 +132,12 @@ def pad(s, width):
 
 
 def colorize(text, val):
-    """
-    根据数值自动添加颜色：涨红跌绿
-    使用 ANSI 转义序列：\033[91m 为亮红，\033[92m 为亮绿，\033[0m 重置颜色
-    """
     if val is None:
         return text
     if val > 0:
-        return f'\033[91m{text}\033[0m'
+        return f'{RED}{text}{RESET}'
     elif val < 0:
-        return f'\033[92m{text}\033[0m'
+        return f'{GREEN}{text}{RESET}'
     return text
 
 
@@ -215,7 +230,6 @@ def fetch_quotes(symbols, batch=60, timeout=15, retry=2, tag='行情'):
                   f'耗时 {time.time() - t0:.2f}s', file=sys.stderr)
             continue
 
-        before = len(quotes)
         for sym, payload in re.findall(r'v_([a-z]{2}\d{6})="([^"]*)"', raw):
             f = payload.split('~')
             if len(f) < 6:
@@ -245,6 +259,7 @@ def run_once(verbose=False):
     run_time = now_str()
     print(f'\n{run_time}')
 
+    # ---------- 可转债部分 ----------
     rows = parse_holdings(HOLDINGS_TEXT)
     cb_symbols = [s for s in (to_symbol(r['code']) for r in rows) if s]
     quotes = fetch_quotes(cb_symbols, tag='转债')
@@ -275,7 +290,7 @@ def run_once(verbose=False):
 
         details.append((r['name'], r['code'], q['price'], pct, w, w * pct / 100.0))
 
-    # ---------- 明细（带颜色） ----------
+    # 明细（按需打印）
     if verbose:
         print('【明细】')
         head = (pad('名称', 12) + pad('代码', 8) + pad('现价', 10) +
@@ -286,7 +301,6 @@ def run_once(verbose=False):
             if price is None:
                 print(pad(name, 12) + pad(code, 8) + '行情缺失')
                 continue
-            # 先对齐，再上色
             pct_str = colorize(pad(f'{pct:+.3f}', 11), pct)
             c_str = colorize(pad(f'{c:+.4f}', 10), c)
             print(pad(name, 12) + pad(code, 8) +
@@ -294,7 +308,7 @@ def run_once(verbose=False):
                   pct_str + pad(f'{w:.2f}', 8) + c_str)
         print('-' * disp_width(head))
 
-    # ---------- 统计（带颜色） ----------
+    # 可转债统计
     avg_pct = None
     contrib = None
     if total_w > 0:
@@ -302,13 +316,47 @@ def run_once(verbose=False):
         contrib = weighted_sum / 100.0
         print(f'【统计】上涨 {up} 只 / 下跌 {down} 只 / 平盘 {flat} 只')
         print(f'【权重】覆盖占比合计：{total_w:.2f}%')
-        # 给涨跌幅和贡献值上色
         print('【加权平均涨跌幅】（按占比归一）：' + colorize(f'{avg_pct:+.3f}%', avg_pct))
         print('【对组合净值的贡献】          ：' + colorize(f'{contrib:+.4f}%', contrib))
     else:
         print('未获取到有效转债行情')
 
-    # ---------- 指数行情（带颜色） ----------
+    # ---------- 债券基金部分（ETF 代理估算） ----------
+    print('=' * 60)
+    bond_codes = [code for _, _, code in BOND_FUND]
+    bond_quotes = fetch_quotes(bond_codes, tag='债券ETF')
+
+    bond_total_contrib = 0.0
+    for name, weight, code in BOND_FUND:
+        q = bond_quotes.get(code)
+        if q:
+            chg = q['pct']
+            c = weight * chg / 100.0
+            bond_total_contrib += c
+            line = (pad(name, 14) + pad(f'{weight:.2f}', 10) +
+                    pad(q['name'], 18) +
+                    colorize(pad(f'{chg:+.3f}', 12), chg) +
+                    colorize(pad(f'{c:+.4f}', 12), c))
+        else:
+            line = (pad(name, 14) + pad(f'{weight:.2f}', 10) +
+                    pad('行情缺失', 18) + pad('--', 12) + pad('--', 12))
+        print(line)
+
+    # ---------- 加权核算 ----------
+    cb_contrib = contrib if contrib is not None else 0.0
+    total_asset_chg = cb_contrib + bond_total_contrib
+    net_chg = total_asset_chg / LEVERAGE
+
+    print('\n加权核算计算')
+    print('-' * 40)
+    print('  可转债贡献          ：' + colorize(f'{cb_contrib:+.4f}%', cb_contrib))
+    print('  债券基金贡献        ：' + colorize(f'{bond_total_contrib:+.4f}%', bond_total_contrib))
+    print('  总资产估算涨跌      ：' + colorize(f'{total_asset_chg:+.4f}%', total_asset_chg))
+    print(f'  杠杆率              ：{LEVERAGE:.4f}')
+    print('  基金净值估算涨跌    ：' + colorize(f'{net_chg:+.4f}%', net_chg))
+    print('-' * 40)
+
+    # ---------- 指数行情 ----------
     idx_quotes = fetch_quotes([s for s, _ in INDEX_SYMBOLS], tag='指数')
     idx_result = {}
     for sym, label in INDEX_SYMBOLS:
@@ -327,6 +375,9 @@ def run_once(verbose=False):
         'total_w': total_w,
         'avg_pct': avg_pct,
         'contrib': contrib,
+        'bond_contrib': bond_total_contrib,
+        'total_asset_chg': total_asset_chg,
+        'net_chg': net_chg,
         'indexes': idx_result,
     }
 
@@ -345,6 +396,9 @@ def save_csv(result):
         fmt(result['total_w'], 2),
         fmt(result['avg_pct'], 3),
         fmt(result['contrib'], 4),
+        fmt(result.get('bond_contrib'), 4),
+        fmt(result.get('total_asset_chg'), 4),
+        fmt(result.get('net_chg'), 4),
     ]
     for label in ('上证指数', '创业板', '沪深300', '科创50'):
         price, pct = idx.get(label, (None, None))
@@ -354,7 +408,7 @@ def save_csv(result):
     with open(CSV_FILE, 'a', newline='', encoding='utf-8-sig') as f:
         writer = csv.writer(f)
         if not file_exists:
-            writer.writerow(CSV_HEADER)
+            writer.writerow(CSV_HEADER + ['债券基金贡献%', '总资产估算%', '净值估算%'])
         writer.writerow(row)
 
 
@@ -372,6 +426,9 @@ def main():
 
             elapsed = time.time() - cycle_start
             wait = max(0.0, INTERVAL - elapsed)
+            next_time = time.strftime('%Y-%m-%d %H:%M:%S',
+                                      time.localtime(time.time() + wait))
+            print(f'【等待】下次运行：{next_time}  (Ctrl+C 退出)\n')
 
             try:
                 time.sleep(wait)
