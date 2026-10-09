@@ -1,0 +1,19 @@
+#启动 sshd
+sudo systemctl enable --now ssh
+sudo systemctl status ssh --no-pager
+
+#确认 sshd 在监听 22 端口
+ss -tlnp | grep :22
+
+
+
+#在服务器
+ssh -D 0.0.0.0:1080 -N zjh@10.68.4.118
+
+export http_proxy=socks5h://127.0.0.1:1080
+export https_proxy=socks5h://127.0.0.1:1080
+export all_proxy=socks5h://127.0.0.1:1080
+export HF_ENDPOINT=https://hf-mirror.com
+
+# 先验证 hf-mirror 能通
+curl -s --max-time 10 https://hf-mirror.com | head -5

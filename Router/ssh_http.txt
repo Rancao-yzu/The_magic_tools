@@ -1,0 +1,32 @@
+sudo systemctl restart privoxy
+
+
+#现在先验证 privoxy 是否正常
+ss -tlnp | grep 8118
+curl -x http://127.0.0.1:8118 -s --max-time 10 https://www.bilibili.com | head -3
+
+
+ssh -R 8080:127.0.0.1:8118 -N -f -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes robosense@10.68.100.16
+
+
+#在服务器验证
+ss -tlnp | grep 8080
+curl -x http://127.0.0.1:8080 -s --max-time 10 https://www.bilibili.com | head -3
+
+
+# 更新apt
+sudo tee /etc/apt/apt.conf.d/95proxy > /dev/null <<'EOF'
+Acquire::http::Proxy "http://127.0.0.1:8080";
+Acquire::https::Proxy "http://127.0.0.1:8080";
+EOF
+
+sudo apt update
+
+#删除apt代理！！！！！！！！！
+sudo rm /etc/apt/apt.conf.d/95proxy
+
+
+
+
+
+

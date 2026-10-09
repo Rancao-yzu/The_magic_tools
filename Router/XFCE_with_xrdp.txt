@@ -1,0 +1,101 @@
+================================================================
+远程桌面配置文档（XFCE + xrdp）
+适用服务器：robosense@10.68.100.16 (Ubuntu 18.04.6)
+日期：2026-10-09
+================================================================
+
+一、背景与问题
+----------------------------------------------------------------
+服务器原使用 GNOME 桌面 + xrdp 远程连接，但连接后黑屏。
+原因：GNOME 需要 3D 硬件加速，而 xrdp 提供的是无 3D 的虚拟显示，
+      导致 gnome-shell 无法正常渲染，会话启动后立即退出。
+同时服务器上还运行了 ToDesk、向日葵、TeamViewer 等多个远程工具，
+互相抢占输入，加剧了卡死和黑屏现象。
+
+二、解决方案
+----------------------------------------------------------------
+改用轻量级桌面环境 XFCE，它不依赖 3D 加速，可在 xrdp 下稳定运行。
+XFCE 与原 GNOME 共存，不影响物理显示器上的 GNOME 会话。
+
+三、操作步骤
+----------------------------------------------------------------
+1. 停止并禁用多余远程工具（避免冲突）
+   sudo systemctl stop runsunloginclient.service
+   sudo systemctl disable runsunloginclient.service
+   sudo pkill -f todesk
+   sudo pkill -f teamviewer
+   sudo pkill -f sunlogin
+
+2. 安装 XFCE
+   sudo apt install -y xfce4 xfce4-goodies
+   安装过程中若提示选择 display manager，保持默认 gdm3 并回车。
+
+3. 修改 xrdp 启动脚本
+   sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+   #!/bin/sh
+   if test -r /etc/profile; then
+       . /etc/profile
+   fi
+   if test -r /etc/default/locale; then
+       . /etc/default/locale
+   fi
+   exec startxfce4
+   EOF
+
+4. 重启 xrdp 服务
+   sudo systemctl restart xrdp xrdp-sesman
+
+四、连接方式
+----------------------------------------------------------------
+RDP 客户端（Windows mstsc / Remmina 等）连接：
+  地址：10.68.100.16:3389
+  用户名：robosense
+  密码：服务器登录密码
+
+首次进入 XFCE 会弹出 Panel 配置对话框，点击 “Use default config” 即可。
+
+五、验证与日志
+----------------------------------------------------------------
+查看 xrdp 服务状态：
+  systemctl status xrdp --no-pager
+  sudo ss -tlnp | grep 3389
+
+查看日志：
+  sudo tail -40 /var/log/xrdp-sesman.log
+  sudo tail -40 /var/log/xrdp.log
+
+六、注意事项
+----------------------------------------------------------------
+1. 不要删除 GNOME，以免影响物理显示器本地登录。
+2. XFCE 仅用于远程管理，不影响服务器原有服务和 GPU 计算任务。
+3. 若需回滚到原 startwm.sh，可提前备份：
+     sudo cp /etc/xrdp/startwm.sh /etc/xrdp/startwm.sh.bak
+4. 服务器重启后 xrdp 会自动启动，无需手动干预。
+5. 如果 RDP 仍无法连接，检查防火墙是否放行 3389 端口。
+
+七、常用命令速查
+----------------------------------------------------------------
+安装 XFCE：
+  sudo apt install -y xfce4 xfce4-goodies
+
+修改启动脚本：
+  sudo tee /etc/xrdp/startwm.sh > /dev/null <<'EOF'
+  #!/bin/sh
+  if test -r /etc/profile; then
+      . /etc/profile
+  fi
+  if test -r /etc/default/locale; then
+      . /etc/default/locale
+  fi
+  exec startxfce4
+  EOF
+
+重启 xrdp：
+  sudo systemctl restart xrdp xrdp-sesman
+
+连接地址：
+  10.68.100.16:3389
+
+================================================================
+文档结束
+================================================================
